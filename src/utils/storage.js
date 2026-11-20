@@ -1,10 +1,18 @@
-import { INITIAL_REGISTRATIONS } from '../data/constants';
+import { EVENTS, CPB_BLOCKS, UNITS, DESIGNATIONS } from '../data/constants';
 
 export const FIREBASE_DB_URL = 'https://donorlistt-default-rtdb.firebaseio.com';
-export const FIREBASE_NODE = 'council_delegates';
-const STORAGE_KEY = 'ssf_velimukku_council_registrations_v2';
 
-// Clean up legacy demo data keys from previous sessions
+export const getEventMeta = (eventKey = 'vlm') => {
+  const evt = EVENTS[eventKey] || EVENTS.vlm;
+  return {
+    node: evt.firebaseNode || 'council_delegates',
+    storageKey: evt.storageKey || 'ssf_velimukku_council_registrations_v2',
+    passPrefix: evt.passPrefix || 'SSF-VLM-2026',
+    eventConfig: evt
+  };
+};
+
+// Clean up legacy keys
 try {
   localStorage.removeItem('ssf_velimukku_council_registrations_2026');
 } catch (e) {
@@ -18,10 +26,11 @@ const sanitizeDelegate = (item) => {
   return clean;
 };
 
-// Synchronous local storage read (returns cached list or [])
-export const getStoredRegistrations = () => {
+// Synchronous local storage read
+export const getStoredRegistrations = (eventKey = 'vlm') => {
+  const { storageKey } = getEventMeta(eventKey);
   try {
-    const data = localStorage.getItem(STORAGE_KEY);
+    const data = localStorage.getItem(storageKey);
     if (!data) return [];
     const parsed = JSON.parse(data);
     if (!Array.isArray(parsed)) return [];
@@ -33,9 +42,10 @@ export const getStoredRegistrations = () => {
 };
 
 // Fetch latest from Firebase Realtime Database
-export const fetchRegistrationsFromFirebase = async () => {
+export const fetchRegistrationsFromFirebase = async (eventKey = 'vlm') => {
+  const { node, storageKey } = getEventMeta(eventKey);
   try {
-    const res = await fetch(`${FIREBASE_DB_URL}/${FIREBASE_NODE}.json`);
+    const res = await fetch(`${FIREBASE_DB_URL}/${node}.json`);
     if (!res.ok) {
       throw new Error(`Firebase fetch failed: ${res.statusText}`);
     }
@@ -51,20 +61,21 @@ export const fetchRegistrationsFromFirebase = async () => {
     sanitized.sort((a, b) => new Date(b.registeredAt || 0) - new Date(a.registeredAt || 0));
     
     // Save to local cache
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized));
+    localStorage.setItem(storageKey, JSON.stringify(sanitized));
     return sanitized;
   } catch (err) {
-    console.warn('Firebase sync offline or blocked, returning cached data:', err);
-    return getStoredRegistrations();
+    console.warn(`Firebase sync offline for ${node}, returning cached data:`, err);
+    return getStoredRegistrations(eventKey);
   }
 };
 
-// Determine next council number (e.g. 1 -> SSF-VLM-2026-001)
-const getNextCouncilNumber = (list) => {
+// Determine next council number (e.g. SSF-CPB-2026-001 or SSF-VLM-2026-001)
+const getNextCouncilNumber = (list, passPrefix) => {
   let maxNum = 0;
+  const regex = new RegExp(`${passPrefix}-(\\d+)`);
   list.forEach(item => {
     if (item && item.id) {
-      const match = item.id.match(/SSF-VLM-2026-(\d+)/);
+      const match = item.id.match(regex);
       if (match) {
         const num = parseInt(match[1], 10);
         if (!isNaN(num) && num > maxNum) {
@@ -76,30 +87,39 @@ const getNextCouncilNumber = (list) => {
   return maxNum + 1;
 };
 
-// Save a new registration to Firebase and LocalStorage
-export const saveRegistration = async (newDelegate) => {
-  // Read current list (from cache or live)
-  const current = getStoredRegistrations();
+// Save a new registration
+export const saveRegistration = async (newDelegate, eventKey = 'vlm') => {
+  const { node, storageKey, passPrefix, eventConfig } = getEventMeta(eventKey);
+  const current = getStoredRegistrations(eventKey);
   
-  const nextNum = getNextCouncilNumber(current);
-  const id = `SSF-VLM-2026-${String(nextNum).padStart(3, '0')}`;
+  const nextNum = getNextCouncilNumber(current, passPrefix);
+  const id = `${passPrefix}-${String(nextNum).padStart(3, '0')}`;
   
   const delegateWithMeta = {
     id,
     name: newDelegate.name.trim(),
     mobile: newDelegate.mobile.trim(),
-    unit: newDelegate.unit,
-    designation: newDelegate.designation,
-    registeredAt: new Date().toISOString()
+    registeredAt: new Date().toISOString(),
+    event: eventKey
   };
+
+  if (eventConfig.hasBlocks) {
+    delegateWithMeta.block = newDelegate.block || 'Block Qadisiyya';
+  }
+  if (eventConfig.hasUnits) {
+    delegateWithMeta.unit = newDelegate.unit;
+  }
+  if (eventConfig.hasDesignation) {
+    delegateWithMeta.designation = newDelegate.designation;
+  }
   
   // Update local cache immediately
   const updated = [delegateWithMeta, ...current.filter(d => d.id !== id)];
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+  localStorage.setItem(storageKey, JSON.stringify(updated));
 
   // Sync to Firebase Realtime Database
   try {
-    await fetch(`${FIREBASE_DB_URL}/${FIREBASE_NODE}/${id}.json`, {
+    await fetch(`${FIREBASE_DB_URL}/${node}/${id}.json`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(delegateWithMeta)
@@ -112,8 +132,9 @@ export const saveRegistration = async (newDelegate) => {
 };
 
 // Update an existing registration
-export const updateRegistration = async (id, updatedFields) => {
-  const current = getStoredRegistrations();
+export const updateRegistration = async (id, updatedFields, eventKey = 'vlm') => {
+  const { node, storageKey } = getEventMeta(eventKey);
+  const current = getStoredRegistrations(eventKey);
   const cleanUpdates = sanitizeDelegate(updatedFields) || {};
 
   const updated = current.map(item => {
@@ -122,11 +143,11 @@ export const updateRegistration = async (id, updatedFields) => {
     }
     return item;
   });
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+  localStorage.setItem(storageKey, JSON.stringify(updated));
 
   // Sync to Firebase
   try {
-    await fetch(`${FIREBASE_DB_URL}/${FIREBASE_NODE}/${id}.json`, {
+    await fetch(`${FIREBASE_DB_URL}/${node}/${id}.json`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(cleanUpdates)
@@ -139,14 +160,15 @@ export const updateRegistration = async (id, updatedFields) => {
 };
 
 // Delete a registration
-export const deleteRegistration = async (id) => {
-  const current = getStoredRegistrations();
+export const deleteRegistration = async (id, eventKey = 'vlm') => {
+  const { node, storageKey } = getEventMeta(eventKey);
+  const current = getStoredRegistrations(eventKey);
   const updated = current.filter(item => item.id !== id);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+  localStorage.setItem(storageKey, JSON.stringify(updated));
 
   // Sync to Firebase
   try {
-    await fetch(`${FIREBASE_DB_URL}/${FIREBASE_NODE}/${id}.json`, {
+    await fetch(`${FIREBASE_DB_URL}/${node}/${id}.json`, {
       method: 'DELETE'
     });
   } catch (err) {
@@ -157,26 +179,27 @@ export const deleteRegistration = async (id) => {
 };
 
 // Realtime subscription (SSE + Polling fallback)
-export const subscribeToRegistrations = (callback) => {
+export const subscribeToRegistrations = (callback, eventKey = 'vlm') => {
+  const { node } = getEventMeta(eventKey);
   let isSubscribed = true;
   let eventSource = null;
   let pollInterval = null;
 
   // Immediate fetch on subscribe
-  fetchRegistrationsFromFirebase().then(data => {
+  fetchRegistrationsFromFirebase(eventKey).then(data => {
     if (isSubscribed) callback(data);
   });
 
   // Try Firebase SSE for instantaneous updates
   try {
     if (typeof window !== 'undefined' && window.EventSource) {
-      eventSource = new EventSource(`${FIREBASE_DB_URL}/${FIREBASE_NODE}.json`);
+      eventSource = new EventSource(`${FIREBASE_DB_URL}/${node}.json`);
       eventSource.addEventListener('put', async () => {
-        const data = await fetchRegistrationsFromFirebase();
+        const data = await fetchRegistrationsFromFirebase(eventKey);
         if (isSubscribed) callback(data);
       });
       eventSource.addEventListener('patch', async () => {
-        const data = await fetchRegistrationsFromFirebase();
+        const data = await fetchRegistrationsFromFirebase(eventKey);
         if (isSubscribed) callback(data);
       });
     }
@@ -184,10 +207,10 @@ export const subscribeToRegistrations = (callback) => {
     // SSE fallback
   }
 
-  // Polling fallback every 10 seconds to ensure fresh data
+  // Polling fallback every 10 seconds
   pollInterval = setInterval(async () => {
     if (isSubscribed) {
-      const data = await fetchRegistrationsFromFirebase();
+      const data = await fetchRegistrationsFromFirebase(eventKey);
       callback(data);
     }
   }, 10000);
@@ -199,15 +222,17 @@ export const subscribeToRegistrations = (callback) => {
   };
 };
 
-export const resetToDefaultData = () => {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify([]));
+export const resetToDefaultData = (eventKey = 'vlm') => {
+  const { storageKey } = getEventMeta(eventKey);
+  localStorage.setItem(storageKey, JSON.stringify([]));
   return [];
 };
 
-export const clearAllData = async () => {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify([]));
+export const clearAllData = async (eventKey = 'vlm') => {
+  const { node, storageKey } = getEventMeta(eventKey);
+  localStorage.setItem(storageKey, JSON.stringify([]));
   try {
-    await fetch(`${FIREBASE_DB_URL}/${FIREBASE_NODE}.json`, { method: 'DELETE' });
+    await fetch(`${FIREBASE_DB_URL}/${node}.json`, { method: 'DELETE' });
   } catch (err) {
     console.warn('Failed to clear Firebase data:', err);
   }
@@ -215,26 +240,16 @@ export const clearAllData = async () => {
 };
 
 // Export to PDF formatted report with print trigger
-export const exportToPDF = (registrations, unitStats = []) => {
+export const exportToPDF = (registrations, stats = [], eventKey = 'vlm') => {
   if (!registrations || !registrations.length) {
     alert('No registrations available to export.');
     return;
   }
 
-  // Calculate unit statistics if not passed
-  const unitsMap = {};
-  if (unitStats && unitStats.length > 0) {
-    unitStats.forEach(u => {
-      unitsMap[u.name] = u.count || 0;
-    });
-  } else {
-    registrations.forEach(r => {
-      unitsMap[r.unit] = (unitsMap[r.unit] || 0) + 1;
-    });
-  }
+  const { eventConfig } = getEventMeta(eventKey);
+  const isCpb = eventConfig.hasBlocks;
 
   const totalRegistered = registrations.length;
-  const activeUnitsCount = Object.values(unitsMap).filter(c => c > 0).length;
   const exportDate = new Date().toLocaleDateString('en-GB', {
     day: 'numeric',
     month: 'long',
@@ -245,41 +260,138 @@ export const exportToPDF = (registrations, unitStats = []) => {
     minute: '2-digit'
   });
 
-  // Build rows for Delegate Table
-  const delegateRows = registrations.map((item, index) => `
-    <tr>
-      <td style="text-align:center;font-weight:600;color:#64748b;">${index + 1}</td>
-      <td style="font-family:monospace;font-weight:bold;color:#0284c7;">${item.id}</td>
-      <td style="font-weight:700;color:#0f172a;">${item.name}</td>
-      <td style="font-family:monospace;color:#334155;">+91 ${item.mobile}</td>
-      <td style="color:#0f172a;">${item.unit}</td>
-      <td>
-        <span style="display:inline-block;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600;background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;">
-          ${item.designation}
-        </span>
-      </td>
-    </tr>
-  `).join('');
+  const accentColorHex = isCpb ? '#059669' : '#0284c7'; // Emerald vs Cyan/Sky
 
-  // Build rows for Unit Summary Table
-  const unitRows = Object.entries(unitsMap).map(([unitName, count], idx) => {
-    const pct = totalRegistered > 0 ? Math.round((count / totalRegistered) * 100) : 0;
-    return `
-      <tr>
-        <td style="text-align:center;font-weight:600;color:#64748b;">#${idx + 1}</td>
-        <td style="font-weight:600;color:#0f172a;">${unitName}</td>
-        <td style="text-align:center;font-weight:bold;color:${count > 0 ? '#0284c7' : '#94a3b8'};">${count}</td>
-        <td style="text-align:right;color:#64748b;font-size:12px;">${pct}%</td>
-      </tr>
+  let breakdownHtml = '';
+  let delegateRows = '';
+
+  if (isCpb) {
+    // CPB Block Breakdown
+    const blockRows = CPB_BLOCKS.map((b, idx) => {
+      const count = registrations.filter(r => r.block === b.name || r.block === b.id).length;
+      const pct = totalRegistered > 0 ? Math.round((count / totalRegistered) * 100) : 0;
+      return `
+        <tr>
+          <td style="text-align:center;font-weight:600;color:#64748b;">#${idx + 1}</td>
+          <td style="font-weight:700;color:#0f172a;">
+            ${b.name} <span style="font-weight:normal;color:#059669;font-size:11px;">(${b.subtext})</span>
+          </td>
+          <td style="text-align:center;font-weight:bold;color:${count > 0 ? accentColorHex : '#94a3b8'};">${count}</td>
+          <td style="text-align:right;color:#64748b;font-size:12px;">${pct}%</td>
+        </tr>
+      `;
+    }).join('');
+
+    breakdownHtml = `
+      <div class="section-title" style="border-left-color:${accentColorHex};">Block-Wise Registration Breakdown</div>
+      <table class="unit-table">
+        <thead>
+          <tr>
+            <th style="width:40px;text-align:center;">#</th>
+            <th>Block Name</th>
+            <th style="width:100px;text-align:center;">Registered</th>
+            <th style="width:80px;text-align:right;">Share</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${blockRows}
+        </tbody>
+      </table>
     `;
-  }).join('');
+
+    delegateRows = registrations.map((item, index) => `
+      <tr>
+        <td style="text-align:center;font-weight:600;color:#64748b;">${index + 1}</td>
+        <td style="font-family:monospace;font-weight:bold;color:${accentColorHex};">${item.id}</td>
+        <td style="font-weight:700;color:#0f172a;">${item.name}</td>
+        <td style="font-family:monospace;color:#334155;">+91 ${item.mobile}</td>
+        <td>
+          <span style="display:inline-block;padding:2px 10px;border-radius:9999px;font-size:11px;font-weight:700;background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;">
+            ${item.block || 'Block Qadisiyya'}
+          </span>
+        </td>
+      </tr>
+    `).join('');
+
+  } else {
+    // VLM Unit breakdown
+    const unitsMap = {};
+    if (stats && stats.length > 0) {
+      stats.forEach(u => {
+        unitsMap[u.name] = u.count || 0;
+      });
+    } else {
+      registrations.forEach(r => {
+        unitsMap[r.unit] = (unitsMap[r.unit] || 0) + 1;
+      });
+    }
+
+    const unitRows = Object.entries(unitsMap).map(([unitName, count], idx) => {
+      const pct = totalRegistered > 0 ? Math.round((count / totalRegistered) * 100) : 0;
+      return `
+        <tr>
+          <td style="text-align:center;font-weight:600;color:#64748b;">#${idx + 1}</td>
+          <td style="font-weight:600;color:#0f172a;">${unitName}</td>
+          <td style="text-align:center;font-weight:bold;color:${count > 0 ? accentColorHex : '#94a3b8'};">${count}</td>
+          <td style="text-align:right;color:#64748b;font-size:12px;">${pct}%</td>
+        </tr>
+      `;
+    }).join('');
+
+    breakdownHtml = `
+      <div class="section-title" style="border-left-color:${accentColorHex};">Unit-Wise Registration Breakdown</div>
+      <table class="unit-table">
+        <thead>
+          <tr>
+            <th style="width:40px;text-align:center;">#</th>
+            <th>Unit Name</th>
+            <th style="width:100px;text-align:center;">Registered</th>
+            <th style="width:80px;text-align:right;">Share</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${unitRows}
+        </tbody>
+      </table>
+    `;
+
+    delegateRows = registrations.map((item, index) => `
+      <tr>
+        <td style="text-align:center;font-weight:600;color:#64748b;">${index + 1}</td>
+        <td style="font-family:monospace;font-weight:bold;color:${accentColorHex};">${item.id}</td>
+        <td style="font-weight:700;color:#0f172a;">${item.name}</td>
+        <td style="font-family:monospace;color:#334155;">+91 ${item.mobile}</td>
+        <td style="color:#0f172a;">${item.unit}</td>
+        <td>
+          <span style="display:inline-block;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600;background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;">
+            ${item.designation}
+          </span>
+        </td>
+      </tr>
+    `).join('');
+  }
+
+  const tableHeaderCols = isCpb ? `
+    <th style="width:30px;text-align:center;">#</th>
+    <th style="width:140px;">Council ID</th>
+    <th>Name</th>
+    <th style="width:130px;">Mobile</th>
+    <th style="width:120px;">Block</th>
+  ` : `
+    <th style="width:30px;text-align:center;">#</th>
+    <th style="width:115px;">Council ID</th>
+    <th>Name</th>
+    <th style="width:105px;">Mobile</th>
+    <th style="width:130px;">Unit</th>
+    <th style="width:120px;">Designation</th>
+  `;
 
   const html = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>SSF Velimukku Sector Council 2026 - Delegate Directory</title>
+  <title>${eventConfig.organization} - Delegate Directory</title>
   <style>
     @page {
       size: A4 portrait;
@@ -303,17 +415,17 @@ export const exportToPDF = (registrations, unitStats = []) => {
       max-width: 800px;
       margin: 0 auto 20px auto;
       padding: 14px 20px;
-      background: #0284c7;
+      background: ${accentColorHex};
       color: #ffffff;
       border-radius: 12px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      box-shadow: 0 4px 12px rgba(2, 132, 199, 0.25);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     }
     .no-print button {
       background: #ffffff;
-      color: #0284c7;
+      color: ${accentColorHex};
       border: none;
       padding: 8px 18px;
       font-size: 13px;
@@ -322,7 +434,7 @@ export const exportToPDF = (registrations, unitStats = []) => {
       cursor: pointer;
     }
     .no-print button:hover {
-      background: #f0f9ff;
+      background: #f0fdf4;
     }
     .doc-container {
       max-width: 800px;
@@ -334,7 +446,7 @@ export const exportToPDF = (registrations, unitStats = []) => {
       box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
     }
     .header {
-      border-bottom: 2px solid #0284c7;
+      border-bottom: 2px solid ${accentColorHex};
       padding-bottom: 16px;
       margin-bottom: 20px;
       display: flex;
@@ -352,7 +464,7 @@ export const exportToPDF = (registrations, unitStats = []) => {
       margin: 3px 0 0 0;
       font-size: 14px;
       font-weight: 700;
-      color: #0284c7;
+      color: ${accentColorHex};
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
@@ -369,9 +481,9 @@ export const exportToPDF = (registrations, unitStats = []) => {
     .header-badge {
       display: inline-block;
       padding: 4px 10px;
-      background: #ecfeff;
-      color: #0891b2;
-      border: 1px solid #a5f3fc;
+      background: #f0fdf4;
+      color: ${accentColorHex};
+      border: 1px solid #bbf7d0;
       border-radius: 6px;
       font-weight: 700;
       font-size: 11px;
@@ -379,7 +491,7 @@ export const exportToPDF = (registrations, unitStats = []) => {
     }
     .stats-grid {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(${isCpb ? 3 : 4}, 1fr);
       gap: 12px;
       margin-bottom: 24px;
     }
@@ -393,7 +505,7 @@ export const exportToPDF = (registrations, unitStats = []) => {
     .stat-card .num {
       font-size: 18px;
       font-weight: 800;
-      color: #0284c7;
+      color: ${accentColorHex};
     }
     .stat-card .lbl {
       font-size: 10px;
@@ -413,7 +525,7 @@ export const exportToPDF = (registrations, unitStats = []) => {
       display: flex;
       align-items: center;
       gap: 8px;
-      border-left: 3px solid #0284c7;
+      border-left: 3px solid ${accentColorHex};
       padding-left: 8px;
     }
     table {
@@ -481,7 +593,7 @@ export const exportToPDF = (registrations, unitStats = []) => {
 <body>
   <div class="no-print">
     <div>
-      <strong>📄 SSF Velimukku Sector Students Council 2026</strong>
+      <strong>📄 ${eventConfig.organization} - Students Council 2026</strong>
       <div style="font-size:12px;opacity:0.9;">Choose "Save as PDF" as Destination in the Print dialog to export.</div>
     </div>
     <div style="display:flex;gap:8px;">
@@ -493,9 +605,9 @@ export const exportToPDF = (registrations, unitStats = []) => {
   <div class="doc-container">
     <div class="header">
       <div class="header-left">
-        <h1>SSF VELIMUKKU SECTOR</h1>
+        <h1>${eventConfig.organization.toUpperCase()}</h1>
         <h2>Students Council 2026 • Official Directory</h2>
-        <p>Friday, November 20, 2026 • Venue: Koofa</p>
+        <p>${eventConfig.day}, ${eventConfig.date} ${eventConfig.time ? `• ${eventConfig.time}` : ''} • Venue: ${eventConfig.venue}</p>
       </div>
       <div class="header-right">
         <div class="header-badge">OFFICIAL REPORT</div>
@@ -509,45 +621,30 @@ export const exportToPDF = (registrations, unitStats = []) => {
         <div class="num">${totalRegistered}</div>
         <div class="lbl">Total Registered</div>
       </div>
-      <div class="stat-card">
-        <div class="num">${activeUnitsCount} / 10</div>
-        <div class="lbl">Units Represented</div>
-      </div>
-      <div class="stat-card">
-        <div class="num">${Math.round((activeUnitsCount / 10) * 100)}%</div>
-        <div class="lbl">Unit Coverage</div>
-      </div>
+      ${isCpb ? `
+        <div class="stat-card">
+          <div class="num">3 Blocks</div>
+          <div class="lbl">Block A • B • C</div>
+        </div>
+      ` : `
+        <div class="stat-card">
+          <div class="num">${stats.filter(u => u.count > 0).length} / 10</div>
+          <div class="lbl">Units Represented</div>
+        </div>
+      `}
       <div class="stat-card">
         <div class="num">100%</div>
         <div class="lbl">Verified Status</div>
       </div>
     </div>
 
-    <div class="section-title">Unit-Wise Registration Breakdown</div>
-    <table class="unit-table">
-      <thead>
-        <tr>
-          <th style="width:40px;text-align:center;">#</th>
-          <th>Unit Name</th>
-          <th style="width:100px;text-align:center;">Registered</th>
-          <th style="width:80px;text-align:right;">Share</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${unitRows}
-      </tbody>
-    </table>
+    ${breakdownHtml}
 
-    <div class="section-title">Delegate Directory (${totalRegistered} Delegates)</div>
+    <div class="section-title" style="border-left-color:${accentColorHex};">Delegate Directory (${totalRegistered} Delegates)</div>
     <table>
       <thead>
         <tr>
-          <th style="width:30px;text-align:center;">#</th>
-          <th style="width:115px;">Council ID</th>
-          <th>Name</th>
-          <th style="width:105px;">Mobile</th>
-          <th style="width:130px;">Unit</th>
-          <th style="width:120px;">Designation</th>
+          ${tableHeaderCols}
         </tr>
       </thead>
       <tbody>
@@ -556,7 +653,7 @@ export const exportToPDF = (registrations, unitStats = []) => {
     </table>
 
     <div class="footer">
-      <div>SSF Velimukku Sector • Students' Center Muttichira • ssfvelimukksector@gmail.com</div>
+      <div>${eventConfig.organization} • ${eventConfig.office}</div>
       <div>Official Document • Students Council 2026</div>
     </div>
   </div>
@@ -578,7 +675,6 @@ export const exportToPDF = (registrations, unitStats = []) => {
     printWin.document.write(html);
     printWin.document.close();
   } else {
-    // Popup fallback: create an iframe and print
     const iframe = document.createElement('iframe');
     iframe.style.position = 'fixed';
     iframe.style.top = '-10000px';
@@ -599,28 +695,43 @@ export const exportToPDF = (registrations, unitStats = []) => {
   }
 };
 
-// Export to CSV formatted for Excel / Google Sheets
-export const exportToCSV = (data) => {
+// Export to CSV
+export const exportToCSV = (data, eventKey = 'vlm') => {
   if (!data || !data.length) return;
-  
-  const headers = ['Delegate ID', 'Name', 'Mobile Number', 'Unit', 'Designation', 'Registration Date'];
-  
-  const rows = data.map(item => [
-    `"${item.id}"`,
-    `"${item.name}"`,
-    `"${item.mobile}"`,
-    `"${item.unit}"`,
-    `"${item.designation}"`,
-    `"${new Date(item.registeredAt).toLocaleString()}"`
-  ]);
-  
+  const { eventConfig } = getEventMeta(eventKey);
+  const isCpb = eventConfig.hasBlocks;
+
+  let headers = [];
+  let rows = [];
+
+  if (isCpb) {
+    headers = ['Delegate ID', 'Name', 'Mobile Number', 'Block', 'Registration Date'];
+    rows = data.map(item => [
+      `"${item.id}"`,
+      `"${item.name}"`,
+      `"${item.mobile}"`,
+      `"${item.block || 'Block A'}"`,
+      `"${new Date(item.registeredAt).toLocaleString()}"`
+    ]);
+  } else {
+    headers = ['Delegate ID', 'Name', 'Mobile Number', 'Unit', 'Designation', 'Registration Date'];
+    rows = data.map(item => [
+      `"${item.id}"`,
+      `"${item.name}"`,
+      `"${item.mobile}"`,
+      `"${item.unit}"`,
+      `"${item.designation}"`,
+      `"${new Date(item.registeredAt).toLocaleString()}"`
+    ]);
+  }
+
   const csvContent = [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   
   const link = document.createElement('a');
   link.setAttribute('href', url);
-  link.setAttribute('download', `SSF_Velimukku_Council_Delegates_${new Date().toISOString().slice(0, 10)}.csv`);
+  link.setAttribute('download', `${isCpb ? 'SSF_CPB' : 'SSF_VLM'}_Council_Delegates_${new Date().toISOString().slice(0, 10)}.csv`);
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
